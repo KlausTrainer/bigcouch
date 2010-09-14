@@ -35,46 +35,190 @@ go(DbName, Id, Options) ->
         Error
     end.
 
-handle_message({rexi_DOWN, _, _, _}, _Worker, Acc0) ->
-    skip_message(Acc0);
-handle_message({rexi_EXIT, _Reason}, _Worker, Acc0) ->
-    skip_message(Acc0);
-handle_message(Reply, _Worker, {WaitingCount, R, Replies}) ->
-    case merge_read_reply(make_key(Reply), Reply, Replies) of
-    {_, KeyCount} when KeyCount =:= R ->
-        {stop, Reply};
-    {NewReplies, KeyCount} when KeyCount < R ->
-        if WaitingCount =:= 1 ->
+handle_message({ok, Doc}, _Worker0, {_WaitingCount, 1, _GroupedReplies0}) ->
+    {stop, {ok, Doc}};
+handle_message(NewReply, Worker0, {WaitingCount, R, GroupedReplies0}) ->
+    GroupedReplies =
+    case NewReply of
+    {rexi_DOWN, _RexiMonPid, _ServerPid, _Reason} ->
+        GroupedReplies0;
+    {rexi_EXIT, _Reason} ->
+        GroupedReplies0;
+    _ ->
+        [{Worker0, NewReply} | GroupedReplies0]
+    end,
+    N = list_to_integer(couch_config:get("cluster","n","3")),
+    case length(GroupedReplies) of
+    NumReplies when NumReplies > N div 2 ->
+        % check for quorum
+        case find_r_equal_versions(N div 2 + 1, GroupedReplies) of
+        false when WaitingCount =:= 1 ->
             % last message arrived, but still no quorum
-            repair_read_quorum_failure(NewReplies);
-        true ->
-            {ok, {WaitingCount-1, R, NewReplies}}
+            {Worker, Reply} = get_highest_version(GroupedReplies),
+            case Reply of
+            {not_found, missing} ->
+                ok;
+            _ ->
+                spawn(fun() ->
+                          read_quorum_repairer(GroupedReplies, {Worker, Reply})
+                      end)
+            end,
+            {stop, Reply};
+        false ->
+            {ok, {WaitingCount-1, R, GroupedReplies}};
+        {Worker, Reply} ->
+            % we got a quorum
+            case agree(GroupedReplies) of
+            false when Reply =/= {not_found, missing} ->
+                read_quorum_repairer(GroupedReplies, {Worker, Reply});
+            true ->
+                ok
+            end,
+            {stop, Reply}
+        end;
+    NumReplies when NumReplies >= R ->
+        case find_r_equal_versions(R, GroupedReplies) of
+        {_Worker, Reply} ->
+            % we have reached agreement
+            {stop, Reply};
+        false when WaitingCount =:= 1->
+            % last message arrived: version with highest rev number wins
+            {Worker, Reply} = get_highest_version(GroupedReplies),
+            case Reply of
+            {not_found, missing} ->
+                ok;
+            _ ->
+                spawn(fun() ->
+                          read_quorum_repairer(GroupedReplies, {Worker, Reply})
+                      end)
+            end,
+            {stop, Reply};
+        false ->
+            {ok, {WaitingCount-1, R, GroupedReplies}}
+        end;
+    _ when WaitingCount =:= 1 ->
+        {stop, {not_found, missing}};
+    _ ->
+        {ok, {WaitingCount-1, R, GroupedReplies}}
+    end.
+
+-spec agree({#shard{}, {ok, #doc{}}|{not_found, missing}}) -> boolean().
+agree([H|T]) ->
+    {_Worker0, {Tag0, #doc{revs=Revs0}}} = H,
+    lists:all(
+        fun({_Worker, {Tag, #doc{revs=Revs}}}) ->
+            % for the sake of efficiency do this
+            % instead of comparing whole replies
+            case Tag of
+            not_found when Tag0 =:= not_found ->
+                true;
+            ok when Tag0 =:= ok ->
+                case Revs of
+                Revs0 -> true;
+                _ -> false
+                end;
+            _ ->
+                false
+            end
+        end, T).
+
+-spec find_r_equal_versions(integer(), {#shard{}, {ok, #doc{}}|{not_found, missing}}) -> {#shard{}, {ok, #doc{}}} | {nil, {not_found, missing}}.
+find_r_equal_versions(R, GroupedReplies) ->
+    case lists:dropwhile(
+             fun({_Worker0, {Tag0, #doc{revs=Revs0}}}) ->
+                 case lists:filter(
+                     fun({_Worker, {Tag, #doc{revs=Revs}}}) ->
+                         % for the sake of efficiency do this
+                         % instead of comparing whole replies
+                         case Tag of
+                         not_found when Tag0 =:= not_found ->
+                             true;
+                         ok when Tag0 =:= ok ->
+                             case Revs of
+                             Revs0 -> true;
+                             _ -> false
+                             end;
+                         _ ->
+                             false
+                         end
+                     end, GroupedReplies) of
+                 L when length(L) < R -> true;
+                 _ -> false
+                 end
+             end, GroupedReplies) of
+    [] ->
+        false;
+    [{Worker, Reply}|_] ->
+        case Reply of
+        {not_found, missing} -> {nil, Reply};
+        {ok, Doc} -> {Worker, {ok, Doc}}
         end
     end.
 
-skip_message({1, _R, Replies}) ->
-    repair_read_quorum_failure(Replies);
-skip_message({WaitingCount, R, Replies}) ->
-    {ok, {WaitingCount-1, R, Replies}}.
+-spec get_highest_version([{#shard{}, {ok, #doc{}}|{not_found, missing}}]) -> {#shard{}, {ok, #doc{}}} | {nil, {not_found, missing}}.
+get_highest_version([H|T]) ->
+    get_highest_version(H, T).
 
-merge_read_reply(Key, Reply, Replies) ->
-    case lists:keyfind(Key, 1, Replies) of
-    false ->
-        {[{Key, Reply, 1} | Replies], 1};
-    {Key, _, N} ->
-        {lists:keyreplace(Key, 1, Replies, {Key, Reply, N+1}), N+1}
-    end.
+get_highest_version(HighestVersion, []) ->
+    case HighestVersion of
+    {_Worker, {not_found, missing}} -> {nil, {not_found, missing}};
+    HighestVersion -> HighestVersion
+    end;
+get_highest_version(HighestVersion0, [H|T]) ->
+    HighestVersion =
+    case H of
+    {_Worker, {ok, #doc{revs=Revs}}} ->
+        {_Worker0, {ok, #doc{revs=Revs0}}} = HighestVersion0,
+        case Revs > Revs0 of
+        true -> H;
+        false -> HighestVersion0
+        end;
+    {_Worker, {not_found, missing}} ->
+        HighestVersion0
+    end,
+    get_highest_version(HighestVersion, T).
 
-make_key({ok, #doc{id=Id, revs=Revs}}) ->
-    {Id, Revs};
-make_key(Else) ->
-    Else.
-
-repair_read_quorum_failure(Replies) ->
-    case [Doc || {_Key, {ok, Doc}, _Count} <- Replies] of
-    [] ->
-        {stop, {not_found, missing}};
-    [Doc|_] ->
-        % TODO merge docs to find the winner as determined by replication
-        {stop, {ok, Doc}}
-    end.
+-spec read_quorum_repairer([{#shard{}, {ok, #doc{}}|{not_found, missing}}], {#shard{}, {ok, #doc{}}}) -> none().
+read_quorum_repairer(GroupedReplies0, {_Worker0, {ok, Doc0}}) ->
+    GroupedReplies =
+    lists:filter(
+        fun({_Worker, Reply}) ->
+            case Reply of
+            {ok, Doc0} -> false;
+            _ -> true
+            end
+        end, GroupedReplies0),
+    WorkerDocsZip =
+    lists:map(
+        fun({Worker, Reply}) ->
+            Docs =
+            case Reply of
+            {ok, Doc} ->
+                {Seq0, [_|T]} = Doc0#doc.revs,
+                {Seq, _} = Doc#doc.revs,
+                case Seq0 of
+                0 when Doc#doc.deleted =/= true ->
+                    [Doc#doc{deleted=true}, Doc0];
+                0 ->
+                    [Doc0];
+                _ when Seq =< Seq0 andalso Doc#doc.deleted =/= true ->
+                    [Doc#doc{deleted=true}, Doc0#doc{revs={Seq0-1, T}}];
+                _ ->
+                    [Doc0#doc{revs={Seq0-1, T}}]
+                end;
+            {not_found, missing} ->
+                {Seq0, [_|T]} = Doc0#doc.revs,
+                case Seq0 of
+                0 ->
+                    [Doc0];
+                _ ->
+                    [Doc0#doc{revs={Seq0-1, T}}]
+                end
+            end,
+            {Worker, Docs}
+        end, GroupedReplies),
+    Options = [merge_conflicts, {user_ctx,{user_ctx,null, [<<"_reader">>,<<"_writer">>,<<"_admin">>], undefined}}],
+    lists:foreach(
+        fun({#shard{name=Name, node=Node}, Docs}) ->
+            rexi:cast(Node, {fabric_rpc, update_docs, [Name, Docs, Options]})
+        end, WorkerDocsZip).
