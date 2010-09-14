@@ -50,7 +50,7 @@ handle_request(#httpd{path_parts=[DbName|RestParts],method=Method,
 handle_changes_req(#httpd{method='GET'}=Req, Db) ->
     #changes_args{filter=Raw, style=Style} = Args0 = parse_changes_query(Req),
     ChangesArgs = Args0#changes_args{
-        filter = couch_changes:make_filter_fun(Raw, Style, Req, Db)
+        filter = couch_changes:configure_filter(Raw, Style, Req, Db)
     },
     case ChangesArgs#changes_args.feed of
     "normal" ->
@@ -115,12 +115,12 @@ is_old_couch(Resp) ->
     end.
 
 handle_compact_req(Req, _) ->
-    Msg = <<"Compaction is handled automatically by Cloudant">>,
+    Msg = <<"Compaction must be triggered on a per-shard basis in BigCouch">>,
     couch_httpd:send_error(Req, 403, forbidden, Msg).
 
-handle_view_cleanup_req(Req, _) ->
-    Msg = <<"Old view indices are purged automatically by Cloudant">>,
-    couch_httpd:send_error(Req, 403, forbidden, Msg).
+handle_view_cleanup_req(Req, Db) ->
+    ok = fabric:cleanup_index_files(Db),
+    send_json(Req, 202, {[{ok, true}]}).
 
 handle_design_req(#httpd{
         path_parts=[_DbName, _Design, Name, <<"_",_/binary>> = Action | _Rest],

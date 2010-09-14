@@ -18,27 +18,33 @@ BigCouch has the same dependencies as CouchDB:
  * Erlang (R13B03 or higher)
  * ICU (4.2 is preferable)
  * Spidermonkey (1.9.2 preferable, [https://launchpad.net/~commonjs/+archive/ppa/][6])
- * LibCurl
+ * LibCurl (7.18 or higher)
  * OpenSSL
  * make
  * Python (2.4 or higher)
 
 #### Installing prerequisites on Ubuntu
 
-    sudo apt-get install erlang libicu42 libcurl-openssl-dev
+    sudo apt-get install erlang libicu42 lbicu-dev libcurl4-openssl-dev
 
 To install Spidermonkey 1.9.2 from PPA:
 
     sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 74EE6429
     sudo bash -c 'echo "deb http://ppa.launchpad.net/commonjs/ppa/ubuntu karmic main" >> /etc/apt/sources.list'
     sudo apt-get update
-    sudo apt-get install libmozjs-1.9.2
+    sudo apt-get install libmozjs-1.9.2 libmozjs-1.9.2-dev
     sudo ln -s /usr/lib/libmozjs-1.9.2.so /usr/lib/libmozjs.so
 
 #### Installing prerequisites on Mac OS X with [Homebrew][7]
 
     brew install erlang icu4c spidermonkey
     brew ln icu4c
+
+#### Installing prerequisites on RedHat/Centos
+
+    yum install js-devel libicu libicu-devel openssl openssl-devel python python-devel
+
+    Erlang and LibCurl need to be installed from source to meet version requirements
 
 #### Building and installing BigCouch
 
