@@ -63,9 +63,9 @@ cat > rel/bigcouch.config << EOF
 {data_dir, "$DATA"}.
 {view_dir, "$VIEW"}.
 {user, "$BIGCOUCH_USER"}.
-{node_name, "-name bigcouch"}.
-{cluster_port, 5984}.
-{backend_port, 5986}.
+{node_name, "-sname bigcouch-1"}.
+{cluster_port, 6001}.
+{backend_port, 6002}.
 EOF
 
 cat > install.mk << EOF
