@@ -48,57 +48,32 @@ handle_message(NewReply, Worker0, {WaitingCount, R, GroupedReplies0}) ->
         [{Worker0, NewReply} | GroupedReplies0]
     end,
     N = list_to_integer(couch_config:get("cluster","n","3")),
-    case length(GroupedReplies) of
-    NumReplies when NumReplies > N div 2 ->
-        % check for quorum
-        case find_r_equal_versions(N div 2 + 1, GroupedReplies) of
-        false when WaitingCount =:= 1 ->
-            % last message arrived, but still no quorum
-            {Worker, Reply} = get_highest_version(GroupedReplies),
-            case Reply of
-            {not_found, missing} ->
-                ok;
-            _ ->
-                spawn(fun() ->
-                          read_quorum_repairer(GroupedReplies, {Worker, Reply})
-                      end)
-            end,
-            {stop, Reply};
-        false ->
-            {ok, {WaitingCount-1, R, GroupedReplies}};
-        {Worker, Reply} ->
-            % we got a quorum
-            case agree(GroupedReplies) of
-            false when Reply =/= {not_found, missing} ->
-                read_quorum_repairer(GroupedReplies, {Worker, Reply});
-            true ->
-                ok
-            end,
-            {stop, Reply}
-        end;
-    NumReplies when NumReplies >= R ->
-        case find_r_equal_versions(R, GroupedReplies) of
-        {_Worker, Reply} ->
-            % we have reached agreement
-            {stop, Reply};
-        false when WaitingCount =:= 1->
-            % last message arrived: version with highest rev number wins
-            {Worker, Reply} = get_highest_version(GroupedReplies),
-            case Reply of
-            {not_found, missing} ->
-                ok;
-            _ ->
-                spawn(fun() ->
-                          read_quorum_repairer(GroupedReplies, {Worker, Reply})
-                      end)
-            end,
-            {stop, Reply};
-        false ->
-            {ok, {WaitingCount-1, R, GroupedReplies}}
-        end;
-    _ when WaitingCount =:= 1 ->
-        {stop, {not_found, missing}};
-    _ ->
+    NumReplies = length(GroupedReplies),
+    Quorum = find_r_equal_versions(N div 2 + 1, GroupedReplies),
+    case Quorum of
+    {_Worker, Reply} ->
+        case agree(GroupedReplies) of
+        false when Reply =/= {not_found, missing} ->
+            read_quorum_repairer(GroupedReplies, Reply);
+        true ->
+            ok
+        end,
+        {stop, Reply};
+    false when NumReplies =:= N ->
+        {_Worker, Reply} = get_highest_version(GroupedReplies),
+        case Reply of
+        {not_found, missing} ->
+            ok;
+        _ ->
+            spawn(fun() ->
+                      read_quorum_repairer(GroupedReplies, Reply)
+                  end)
+        end,
+        {stop, Reply};
+    false when NumReplies >= R orelse WaitingCount =:= 1 ->
+        {_Worker, Reply} = get_highest_version(GroupedReplies),
+        {stop, Reply};
+    false ->
         {ok, {WaitingCount-1, R, GroupedReplies}}
     end.
 
@@ -182,8 +157,8 @@ get_highest_version(HighestVersion0, [H|T]) ->
     end,
     get_highest_version(HighestVersion, T).
 
--spec read_quorum_repairer([{#shard{}, {ok, #doc{}}|{not_found, missing}}], {#shard{}, {ok, #doc{}}}) -> none().
-read_quorum_repairer(GroupedReplies0, {_Worker0, {ok, Doc0}}) ->
+-spec read_quorum_repairer([{#shard{}, {ok, #doc{}}|{not_found, missing}}], {ok, #doc{}}) -> none().
+read_quorum_repairer(GroupedReplies0, {ok, Doc0}) ->
     GroupedReplies =
     lists:filter(
         fun({_Worker, Reply}) ->
