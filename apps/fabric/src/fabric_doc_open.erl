@@ -70,9 +70,17 @@ handle_message(NewReply, Worker0, {WaitingCount, R, GroupedReplies0}) ->
                   end)
         end,
         {stop, Reply};
-    false when NumReplies >= R orelse WaitingCount =:= 1 ->
+    false when WaitingCount =:= 1 ->
         {_Worker, Reply} = get_highest_version(GroupedReplies),
         {stop, Reply};
+    false when NumReplies >= R ->
+        case agree(GroupedReplies) of
+        false ->
+            {ok, {WaitingCount-1, R, GroupedReplies}};
+        true ->
+            {_Worker, Reply} = get_highest_version(GroupedReplies),
+            {stop, Reply}
+        end;
     false ->
         {ok, {WaitingCount-1, R, GroupedReplies}}
     end.
