@@ -104,16 +104,18 @@ handle_message(NewReply, Worker0, {WaitingCount, R, GroupedReplies0}) ->
 
 -spec agree({#shard{}, {ok, #doc{}}|{not_found, missing}}) -> boolean().
 agree([H|T]) ->
-    {_Worker0, {Tag0, #doc{revs=Revs0}}} = H,
+    {_Worker0, {Tag0, Doc0}} = H,
     lists:all(
-        fun({_Worker, {Tag, #doc{revs=Revs}}}) ->
+        fun({_Worker, {Tag, Doc}}) ->
             % for the sake of efficiency do this
             % instead of comparing whole replies
             case Tag of
             not_found when Tag0 =:= not_found ->
                 true;
             ok when Tag0 =:= ok ->
-                case Revs of
+                % here we actually got a #doc{}
+                Revs0 = Doc0#doc.revs,
+                case Doc#doc.revs of
                 Revs0 -> true;
                 _ -> false
                 end;
@@ -125,16 +127,18 @@ agree([H|T]) ->
 -spec find_r_equal_versions(integer(), {#shard{}, {ok, #doc{}}|{not_found, missing}}) -> {#shard{}, {ok, #doc{}}} | {nil, {not_found, missing}}.
 find_r_equal_versions(R, GroupedReplies) ->
     case lists:dropwhile(
-             fun({_Worker0, {Tag0, #doc{revs=Revs0}}}) ->
+             fun({_Worker0, {Tag0, Doc0}}) ->
                  case lists:filter(
-                     fun({_Worker, {Tag, #doc{revs=Revs}}}) ->
+                     fun({_Worker, {Tag, Doc}}) ->
                          % for the sake of efficiency do this
                          % instead of comparing whole replies
                          case Tag of
                          not_found when Tag0 =:= not_found ->
                              true;
                          ok when Tag0 =:= ok ->
-                             case Revs of
+                             % here we actually got a #doc{}
+                             Revs0 = Doc0#doc.revs,
+                             case Doc#doc.revs of
                              Revs0 -> true;
                              _ -> false
                              end;
