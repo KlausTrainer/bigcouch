@@ -49,13 +49,13 @@ handle_message(NewReply, Worker0, {WaitingCount, R, GroupedReplies0}) ->
     end,
     N = list_to_integer(couch_config:get("cluster","n","3")),
     NumReplies = length(GroupedReplies),
-    Quorum = find_r_equal_versions(N div 2 + 1, GroupedReplies),
+    Quorum = find_r_equal_versions(R, GroupedReplies),
     case Quorum of
     {_Worker, Reply} ->
         case agree(GroupedReplies) of
-        false when Reply =/= {not_found, missing} ->
+        false when Reply =/= {not_found, missing} andalso R >= N div 2 + 1 ->
             read_quorum_repairer(GroupedReplies, Reply);
-        true ->
+        _ ->
             ok
         end,
         {stop, Reply};
@@ -70,14 +70,6 @@ handle_message(NewReply, Worker0, {WaitingCount, R, GroupedReplies0}) ->
                   end)
         end,
         {stop, Reply};
-    false when NumReplies >= R ->
-        case agree(GroupedReplies) of
-        false ->
-            {ok, {WaitingCount-1, R, GroupedReplies}};
-        true ->
-            {_Worker, Reply} = get_highest_version(GroupedReplies),
-            {stop, Reply}
-        end;
     false when WaitingCount =:= 1 ->
         rexi;
     false ->
@@ -176,30 +168,11 @@ read_quorum_repairer(GroupedReplies0, {ok, Doc0}) ->
         end, GroupedReplies0),
     WorkerDocsZip =
     lists:map(
-        fun({Worker, Reply}) ->
-            Docs =
-            case Reply of
-            {ok, Doc} ->
-                {Seq0, [_|T]} = Doc0#doc.revs,
-                {Seq, _} = Doc#doc.revs,
-                case Seq0 of
-                0 when Doc#doc.deleted =/= true ->
-                    [Doc#doc{deleted=true}, Doc0];
-                0 ->
-                    [Doc0];
-                _ when Seq =< Seq0 andalso Doc#doc.deleted =/= true ->
-                    [Doc#doc{deleted=true}, Doc0#doc{revs={Seq0-1, T}}];
-                _ ->
-                    [Doc0#doc{revs={Seq0-1, T}}]
-                end;
-            {not_found, missing} ->
-                {Seq0, [_|T]} = Doc0#doc.revs,
-                case Seq0 of
-                0 ->
-                    [Doc0];
-                _ ->
-                    [Doc0#doc{revs={Seq0-1, T}}]
-                end
+        fun({Worker, _Reply}) ->
+            {Seq0, [_|T]} = Doc0#doc.revs,
+            Docs = case Seq0 of
+            0 -> [Doc0];
+            _ -> [Doc0#doc{revs={Seq0-1, T}}]
             end,
             {Worker, Docs}
         end, GroupedReplies),
